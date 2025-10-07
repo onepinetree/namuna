@@ -1,0 +1,8 @@
+/bin
+/include
+/lib
+chat_adjusted.csv
+.env
+data_clean.py
+finetuning_data.jsonl
+pyvenv.cfg
