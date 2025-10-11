@@ -1,7 +1,10 @@
 import os
 import asyncio
 import logging
+from datetime import datetime
 from openai import OpenAI
+import firebase_admin
+from firebase_admin import credentials, firestore
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -12,7 +15,8 @@ logger = logging.getLogger("namuna-chat")
 
 class NamunaChat:
 
-    def __init__(self, api_key: str = None):
+    def __init__(self, api_key: str = None, firebase_cred_path: str = None):
+        # OpenAI 설정
         self.api_key = api_key or os.getenv("NAMUNA_API_KEY")
         self.client = OpenAI(api_key=self.api_key)
         self.model = "ft:gpt-4o-2024-08-06:o-ren-ge:namuna-004:CP6vk9Av"
@@ -29,16 +33,136 @@ Example:
 - 여자친구(user) : 나무 미워 아이스크림 먹을꺼야... => 나무 (assistant) : 아이궁… ㅎㅎ💕 이쁘니 아프면 안되니까.. ㅜㅜ 그럼 오늘은 차가운거 말고 달달한 디저트 먹으까?
 - 여자친구(user) : 아포... => 나무 (assistant) : 아이궁….어디 아포? ㅜㅜㅜㅜ 나무가 호하러 가야하는데...
 - 여자친구(user) : 웅냐냥 => 나무 (assistant) : 이쁘니 오늘 저녁 먹었오?'''
-
+        
+        # Firebase 초기화
+        self._init_firebase(firebase_cred_path)
+        
+    def _init_firebase(self, cred_path: str = None):
+        """Firebase 초기화"""
+        try:
+            # 이미 초기화되어 있으면 스킵
+            if not firebase_admin._apps:
+                cred_path = cred_path or os.getenv("FIREBASE_CRED_PATH")
+                if cred_path and os.path.exists(cred_path):
+                    cred = credentials.Certificate(cred_path)
+                    firebase_admin.initialize_app(cred)
+                    logger.info("✅ Firebase 초기화 완료 (credential file)")
+                else:
+                    # 환경 변수가 없으면 기본 credential 사용 (개발 환경)
+                    firebase_admin.initialize_app()
+                    logger.info("✅ Firebase 초기화 완료 (default credentials)")
+                
+                self.db = firestore.client()
+                logger.info("✅ Firestore 클라이언트 생성 완료")
+            else:
+                self.db = firestore.client()
+                logger.info("✅ 기존 Firebase 앱 사용")
+        except Exception as e:
+            logger.error(f"❌ Firebase 초기화 실패: {e}")
+            self.db = None
+    
+    def _get_today_date(self) -> str:
+        """오늘 날짜를 YYYY-MM-DD 형식으로 반환"""
+        return datetime.now().strftime("%Y-%m-%d")
+    
+    async def save_message(self, role: str, content: str, date: str = None):
+        """
+        메시지를 Firestore에 저장
+        
+        Parameters:
+        - role: "user" 또는 "assistant"
+        - content: 메시지 내용
+        - date: 저장할 날짜 (기본값: 오늘)
+        """
+        if not self.db:
+            logger.warning("⚠️ Firestore가 초기화되지 않아 메시지를 저장할 수 없습니다")
+            return
+        
+        try:
+            date = date or self._get_today_date()
+            doc_ref = self.db.collection('chat_history').document(date)
+            
+            message_data = {
+                "role": role,
+                "content": content,
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            # 문서가 이미 존재하면 messages 배열에 추가, 없으면 새로 생성
+            doc = doc_ref.get()
+            if doc.exists:
+                doc_ref.update({
+                    "messages": firestore.ArrayUnion([message_data])
+                })
+            else:
+                doc_ref.set({
+                    "date": date,
+                    "messages": [message_data],
+                    "created_at": datetime.now().isoformat()
+                })
+            
+            logger.info(f"✅ 메시지 저장 완료: {role} - {date}")
+        except Exception as e:
+            logger.error(f"❌ 메시지 저장 실패: {e}")
+    
+    async def get_chat_history(self, date: str = None) -> list:
+        """
+        특정 날짜의 대화 기록을 가져옴
+        
+        Parameters:
+        - date: 가져올 날짜 (기본값: 오늘)
+        
+        Returns:
+        - messages: [{"role": "user", "content": "..."}, ...]
+        """
+        if not self.db:
+            logger.warning("⚠️ Firestore가 초기화되지 않아 대화 기록을 가져올 수 없습니다")
+            return []
+        
+        try:
+            date = date or self._get_today_date()
+            doc_ref = self.db.collection('chat_history').document(date)
+            doc = doc_ref.get()
+            
+            if doc.exists:
+                data = doc.to_dict()
+                messages = data.get('messages', [])
+                logger.info(f"✅ 대화 기록 로드 완료: {date} ({len(messages)}개 메시지)")
+                # timestamp 필드 제거하고 반환 (OpenAI API에는 role과 content만 필요)
+                return [{"role": msg["role"], "content": msg["content"]} for msg in messages]
+            else:
+                logger.info(f"📝 {date}의 대화 기록이 없습니다 (새로운 대화 시작)")
+                return []
+        except Exception as e:
+            logger.error(f"❌ 대화 기록 로드 실패: {e}")
+            return []
+    
     async def get_message_from_namuna(
         self, 
-        message: str, 
+        message: str,
+        chat_history: list = None,
     ) -> str:
+        """
+        AI 응답 생성 (대화 기록 포함)
         
-        previous_chat_list = [
-            {"role": "system", "content": self.system_prompt},
-            {"role": "user", "content": message}
-        ]
+        Parameters:
+        - message: 사용자 메시지
+        - chat_history: 이전 대화 기록 (선택사항)
+        
+        Returns:
+        - AI 응답
+        """
+        # 대화 리스트 구성: system prompt + 이전 대화 기록 + 현재 메시지
+        previous_chat_list = [{"role": "system", "content": self.system_prompt}]
+        
+        # 대화 기록이 있으면 추가
+        if chat_history:
+            previous_chat_list.extend(chat_history)
+        
+        # 현재 사용자 메시지 추가
+        previous_chat_list.append({"role": "user", "content": message})
+        
+        logger.info(f"💬 총 {len(previous_chat_list)}개 메시지로 AI 요청 (system + 기록 {len(chat_history) if chat_history else 0}개 + 현재 1개)")
 
         for attempt in range(self.max_retries):
             try:
@@ -72,6 +196,48 @@ Example:
         
         # 이 부분은 도달하지 않지만, 타입 체커를 위해 추가
         return "(오류가 발생했습니다)"
+    
+    async def chat_with_history(self, user_message: str) -> str:
+        """
+        대화 기록을 관리하면서 AI 응답 생성
+        
+        흐름:
+        1. 사용자 메시지 저장
+        2. 오늘의 대화 기록 불러오기
+        3. AI 응답 생성
+        4. AI 응답 저장
+        5. 응답 반환
+        
+        Parameters:
+        - user_message: 사용자 메시지
+        
+        Returns:
+        - AI 응답
+        """
+        try:
+            # 1. 사용자 메시지 저장
+            logger.info("1️⃣ 사용자 메시지 저장 중...")
+            await self.save_message("user", user_message)
+            
+            # 2. 오늘의 대화 기록 불러오기 (방금 저장한 메시지 제외)
+            logger.info("2️⃣ 대화 기록 불러오는 중...")
+            chat_history = await self.get_chat_history()
+            
+            # 3. AI 응답 생성 (대화 기록 포함)
+            logger.info("3️⃣ AI 응답 생성 중...")
+            ai_response = await self.get_message_from_namuna(user_message, chat_history)
+            
+            # 4. AI 응답 저장
+            logger.info("4️⃣ AI 응답 저장 중...")
+            await self.save_message("assistant", ai_response)
+            
+            # 5. 응답 반환
+            logger.info("5️⃣ 응답 반환 완료")
+            return ai_response
+            
+        except Exception as e:
+            logger.error(f"❌ chat_with_history 실패: {e}")
+            return "나무나 오류 발생.. 나무 너 큰일났다 이제.. 이쁘니 사랑해"
 
 
 # ============================================================================

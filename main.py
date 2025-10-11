@@ -165,12 +165,20 @@ async def namuna_chat_callback(request: Request, background_tasks: BackgroundTas
 async def process_callback(callback_url: str, user_message: str):
     """
     시간이 걸리는 작업을 처리하고 결과를 callbackUrl로 전송
+    
+    흐름:
+    1. 사용자 메시지 저장
+    2. 오늘의 대화 기록 불러오기
+    3. AI 응답 생성 (대화 기록 포함)
+    4. AI 응답 저장
+    5. 콜백 URL로 응답 전송
     """
     try:
         logger.info("🔧 백그라운드 작업 시작...")
         
-        # NamunaChat으로 AI 응답 생성 (전역 인스턴스 사용)
-        ai_response = await namuna_chat.get_message_from_namuna(user_message)
+        # NamunaChat으로 AI 응답 생성 (대화 기록 포함)
+        # chat_with_history가 자동으로 저장/불러오기/AI 요청/저장을 수행
+        ai_response = await namuna_chat.chat_with_history(user_message)
         logger.info(f"🤖 AI 응답 생성 완료: {ai_response[:50]}...")
         
         # 최종 응답 데이터 생성
