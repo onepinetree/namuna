@@ -148,7 +148,7 @@ async def say_hello_callback(request: Request, background_tasks: BackgroundTasks
         # 즉시 응답 (useCallback: true)
         immediate_response = {
             "version": "2.0",
-            "useCallback": true,
+            "useCallback": True,
             "data": {
                 "text": "나무나 생각중.. ☺️ "
             }
