@@ -1,16 +1,17 @@
 from fastapi import FastAPI, Request, BackgroundTasks
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 import uvicorn
-from pydantic import BaseModel
-from typing import Any, Dict, Optional
 import logging
 import httpx
 import asyncio
+from chat import NamunaChat
 
 app = FastAPI()
+
+# NamunaChat 전역 인스턴스
+namuna_chat = None
 
 # CORS 설정
 app.add_middleware(
@@ -30,6 +31,19 @@ logging.basicConfig(
 logger = logging.getLogger("fastapi-logger")
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("openai").setLevel(logging.WARNING)
+
+
+# 시작 이벤트: NamunaChat 초기화
+@app.on_event("startup")
+async def startup_event():
+    global namuna_chat
+    logger.info("🚀 서버 시작: NamunaChat 초기화 중...")
+    try:
+        namuna_chat = NamunaChat()
+        logger.info("✅ NamunaChat 초기화 완료")
+    except Exception as e:
+        logger.error(f"❌ NamunaChat 초기화 실패: {e}")
+        raise
 
 
 # 로깅 미들웨어
@@ -81,8 +95,7 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
                 "error": "Not Found",
                 "message": f"경로를 찾을 수 없습니다: {request.method} {request.url.path}",
                 "available_endpoints": [
-                    {"method": "POST", "path": "/api/sayHello", "description": "기본 인사 (동기)"},
-                    {"method": "POST", "path": "/api/sayHelloCallback", "description": "인사 메시지 (콜백)"},
+                    {"method": "POST", "path": "/api/namuna_chat", "description": "나무나 AI 챗봇 (콜백 방식)"},
                 ],
                 "tip": "API 문서를 보려면 /docs 로 접속하세요"
             }
@@ -90,30 +103,13 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
     return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
 
-# 🔹 기존 엔드포인트 (동기 방식)
-@app.post("/api/sayHello")
-async def say_hello(request: Request):
-    logger.info("💬 sayHello 엔드포인트 실행 중...")
-    response_body = {
-        "version": "2.0",
-        "template": {
-            "outputs": [
-                {
-                    "simpleText": {
-                        "text": "hello I'm Ryan"
-                    }
-                }
-            ]
-        }
-    }
-    logger.info("💬 응답 준비 완료")
-    return JSONResponse(status_code=200, content=response_body)
+
 
 
 # 🔹 새로운 콜백 엔드포인트
-@app.post("/api/sayHelloCallback")
-async def say_hello_callback(request: Request, background_tasks: BackgroundTasks):
-    logger.info("🔄 sayHelloCallback 엔드포인트 실행 중...")
+@app.post("/api/namuna_chat")
+async def namuna_chat_callback(request: Request, background_tasks: BackgroundTasks):
+    logger.info("🔄 namuna_chat 엔드포인트 실행 중...")
     
     try:
         # 요청 본문 파싱
@@ -173,8 +169,9 @@ async def process_callback(callback_url: str, user_message: str):
     try:
         logger.info("🔧 백그라운드 작업 시작...")
         
-        # 시간이 걸리는 작업 시뮬레이션 (실제로는 AI 처리, DB 조회 등)
-        await asyncio.sleep(3)  # 3초 대기 (실제 작업으로 대체하세요)
+        # NamunaChat으로 AI 응답 생성 (전역 인스턴스 사용)
+        ai_response = await namuna_chat.get_message_from_namuna(user_message)
+        logger.info(f"🤖 AI 응답 생성 완료: {ai_response[:50]}...")
         
         # 최종 응답 데이터 생성
         final_response = {
@@ -183,7 +180,7 @@ async def process_callback(callback_url: str, user_message: str):
                 "outputs": [
                     {
                         "simpleText": {
-                            "text": f"hello I'm Ryan! 🎉\n\n당신의 메시지: '{user_message}'\n\n처리 완료되었습니다!"
+                            "text": ai_response
                         }
                     }
                 ]
@@ -191,7 +188,7 @@ async def process_callback(callback_url: str, user_message: str):
         }
         
         # callbackUrl로 최종 응답 전송
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             logger.info(f"📤 콜백 URL로 최종 응답 전송 중: {callback_url}")
             response = await client.post(callback_url, json=final_response)
             
@@ -222,13 +219,12 @@ async def process_callback(callback_url: str, user_message: str):
 
 if __name__ == "__main__":
     print("\n" + "=" * 60)
-    print("🚀 FastAPI 서버 시작!")
+    print("🚀 나무나 AI 챗봇 서버 시작!")
     print("=" * 60)
     print(f"📍 서버 주소: http://0.0.0.0:8000")
     print(f"📖 API 문서: http://localhost:8000/docs")
     print("\n등록된 엔드포인트:")
-    print("  - POST /api/sayHello (기본 동기 방식)")
-    print("  - POST /api/sayHelloCallback (콜백 방식) ⭐ NEW!")
+    print("  - POST /api/namuna_chat (나무나 AI 챗봇 - 콜백 방식)")
     print("=" * 60 + "\n")
     
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
