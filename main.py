@@ -1,23 +1,24 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, BackgroundTasks
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 import uvicorn
 from pydantic import BaseModel
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 import logging
-
+import httpx
+import asyncio
 
 app = FastAPI()
 
-# CORS 완전 개방 (모든 보안 제거)
+# CORS 설정
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],              # 모든 origin 허용
-    allow_credentials=True,           # 쿠키/인증 정보 허용
-    allow_methods=["*"],              # 모든 HTTP 메서드 허용 (GET, POST, PUT, DELETE 등)
-    allow_headers=["*"],              # 모든 헤더 허용
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # 로깅 설정
@@ -27,27 +28,22 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S"
 )
 logger = logging.getLogger("fastapi-logger")
-
-# 다른 라이브러리 로그 수준 조정
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("openai").setLevel(logging.WARNING)
 
 
-# 상세 요청 로깅 미들웨어
+# 로깅 미들웨어
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
-    # 요청 정보 로그
     logger.info("=" * 60)
     logger.info(f"📥 [요청 들어옴] {request.method} {request.url.path}")
     logger.info(f"🌐 클라이언트 IP: {request.client.host if request.client else 'Unknown'}")
     logger.info(f"🔗 전체 URL: {request.url}")
     
-    # 헤더 로그
     logger.info("📋 요청 헤더:")
     for header_name, header_value in request.headers.items():
         logger.info(f"   {header_name}: {header_value}")
     
-    # 요청 본문 로그 (POST 요청인 경우)
     if request.method == "POST":
         try:
             body = await request.body()
@@ -57,14 +53,12 @@ async def log_requests(request: Request, call_next):
             else:
                 logger.info("📦 요청 본문: (비어있음)")
             
-            # body를 다시 사용할 수 있도록 재설정
             async def receive():
                 return {"type": "http.request", "body": body}
             request._receive = receive
         except Exception as e:
             logger.error(f"❌ 요청 본문 읽기 실패: {str(e)}")
     
-    # 실제 엔드포인트 처리
     try:
         response = await call_next(request)
         logger.info(f"✅ [응답 전송] 상태 코드: {response.status_code}")
@@ -81,17 +75,14 @@ async def log_requests(request: Request, call_next):
 async def http_exception_handler(request: Request, exc: StarletteHTTPException):
     if exc.status_code == 404:
         logger.warning(f"⚠️ [404 NOT FOUND] 존재하지 않는 경로: {request.method} {request.url.path}")
-        logger.warning(f"사용 가능한 엔드포인트:")
-        logger.warning(f"  - POST /api/sayHello")
-        logger.warning(f"  - GET  /docs (API 문서)")
-        
         return JSONResponse(
             status_code=404,
             content={
                 "error": "Not Found",
                 "message": f"경로를 찾을 수 없습니다: {request.method} {request.url.path}",
                 "available_endpoints": [
-                    {"method": "POST", "path": "/api/sayHello", "description": "인사 메시지 반환"},
+                    {"method": "POST", "path": "/api/sayHello", "description": "기본 인사 (동기)"},
+                    {"method": "POST", "path": "/api/sayHelloCallback", "description": "인사 메시지 (콜백)"},
                 ],
                 "tip": "API 문서를 보려면 /docs 로 접속하세요"
             }
@@ -99,6 +90,7 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
     return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
 
+# 🔹 기존 엔드포인트 (동기 방식)
 @app.post("/api/sayHello")
 async def say_hello(request: Request):
     logger.info("💬 sayHello 엔드포인트 실행 중...")
@@ -118,27 +110,114 @@ async def say_hello(request: Request):
     return JSONResponse(status_code=200, content=response_body)
 
 
-# @app.post("/api/showHello")
-# async def show_hello(request: Request):
-#     # 요청 본문 출력
+# 🔹 새로운 콜백 엔드포인트
+@app.post("/api/sayHelloCallback")
+async def say_hello_callback(request: Request, background_tasks: BackgroundTasks):
+    logger.info("🔄 sayHelloCallback 엔드포인트 실행 중...")
+    
+    try:
+        # 요청 본문 파싱
+        body = await request.json()
+        
+        # callbackUrl 추출
+        callback_url = body.get("userRequest", {}).get("callbackUrl")
+        user_message = body.get("userRequest", {}).get("utterance", "")
+        
+        logger.info(f"📞 콜백 URL 추출: {callback_url}")
+        logger.info(f"💬 사용자 발화: {user_message}")
+        
+        if not callback_url:
+            logger.warning("⚠️ callbackUrl이 없습니다. 일반 응답으로 처리합니다.")
+            # callbackUrl이 없으면 일반 응답
+            return JSONResponse(status_code=200, content={
+                "version": "2.0",
+                "template": {
+                    "outputs": [
+                        {
+                            "simpleText": {
+                                "text": "hello I'm Namuna. 이쁘니 미안해 오류 발생"
+                            }
+                        }
+                    ]
+                }
+            })
+        
+        # 백그라운드 작업으로 콜백 처리 등록
+        background_tasks.add_task(process_callback, callback_url, user_message)
+        
+        # 즉시 응답 (useCallback: true)
+        immediate_response = {
+            "version": "2.0",
+            "useCallback": True,
+            "data": {
+                "text": "나무나 생각중.. ☺️ "
+            }
+        }
+        
+        logger.info("✅ 즉시 응답 전송 완료 (useCallback: true)")
+        return JSONResponse(status_code=200, content=immediate_response)
+        
+    except Exception as e:
+        logger.error(f"❌ 에러 발생: {str(e)}")
+        return JSONResponse(status_code=500, content={
+            "error": "Internal Server Error",
+            "message": str(e)
+        })
+
+
+# 🔹 콜백 처리 함수 (백그라운드 작업)
+async def process_callback(callback_url: str, user_message: str):
+    """
+    시간이 걸리는 작업을 처리하고 결과를 callbackUrl로 전송
+    """
+    try:
+        logger.info("🔧 백그라운드 작업 시작...")
+        
+        # 시간이 걸리는 작업 시뮬레이션 (실제로는 AI 처리, DB 조회 등)
+        await asyncio.sleep(3)  # 3초 대기 (실제 작업으로 대체하세요)
+        
+        # 최종 응답 데이터 생성
+        final_response = {
+            "version": "2.0",
+            "template": {
+                "outputs": [
+                    {
+                        "simpleText": {
+                            "text": f"hello I'm Ryan! 🎉\n\n당신의 메시지: '{user_message}'\n\n처리 완료되었습니다!"
+                        }
+                    }
+                ]
+            }
+        }
+        
+        # callbackUrl로 최종 응답 전송
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            logger.info(f"📤 콜백 URL로 최종 응답 전송 중: {callback_url}")
+            response = await client.post(callback_url, json=final_response)
+            
+            if response.status_code == 200:
+                logger.info("✅ 콜백 전송 성공!")
+                callback_result = response.json()
+                logger.info(f"📥 콜백 응답: {callback_result}")
+            else:
+                logger.error(f"❌ 콜백 전송 실패: 상태 코드 {response.status_code}")
+                logger.error(f"응답 내용: {response.text}")
+                
+    except Exception as e:
+        logger.error(f"❌ 콜백 처리 중 에러 발생: {str(e)}")
+
+
+# 🔹 콜백 응답 수신용 엔드포인트 (테스트용 - 실제로는 카카오 서버가 처리)
+# @app.post("/callback/result")
+# async def callback_result(request: Request):
+#     """
+#     콜백 응답을 받는 엔드포인트 (테스트/디버깅용)
+#     실제 환경에서는 카카오 서버가 직접 처리하므로 이 엔드포인트는 필요 없음
+#     """
 #     body = await request.json()
-#     print(body)
-    
-#     response_body = {
-#         "version": "2.0",
-#         "template": {
-#             "outputs": [
-#                 {
-#                     "simpleImage": {
-#                         "imageUrl": "https://t1.daumcdn.net/friends/prod/category/M001_friends_ryan2.jpg",
-#                         "altText": "hello I'm Ryan"
-#                     }
-#                 }
-#             ]
-#         }
-#     }
-    
-#     return JSONResponse(status_code=200, content=response_body)
+#     logger.info("📨 콜백 결과 수신:")
+#     logger.info(f"{body}")
+#     return JSONResponse(status_code=200, content={"status": "received"})
 
 
 if __name__ == "__main__":
@@ -148,7 +227,8 @@ if __name__ == "__main__":
     print(f"📍 서버 주소: http://0.0.0.0:8000")
     print(f"📖 API 문서: http://localhost:8000/docs")
     print("\n등록된 엔드포인트:")
-    print("  - POST /api/sayHello")
+    print("  - POST /api/sayHello (기본 동기 방식)")
+    print("  - POST /api/sayHelloCallback (콜백 방식) ⭐ NEW!")
     print("=" * 60 + "\n")
     
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
