@@ -20,8 +20,8 @@ class NamunaChat:
         self.api_key = api_key or os.getenv("NAMUNA_API_KEY")
         self.client = OpenAI(api_key=self.api_key)
         # self.model = "ft:gpt-4o-2024-08-06:o-ren-ge:namuna-004:CP6vk9Av"
-        self.model = "gpt-4o-2024-08-06"
-        self.temperature = 0.71
+        self.model = "ft:gpt-4.1-2025-04-14:o-ren-ge:namuna-002:CP65FD0f:ckpt-step-656"
+        self.temperature = 0.70
         self.max_retries = 3
         self.system_prompt = '''
 Role & Requirement:
