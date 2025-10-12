@@ -42,15 +42,17 @@ Example:
         try:
             # 이미 초기화되어 있으면 스킵
             if not firebase_admin._apps:
-                cred_path = cred_path or os.getenv("FIREBASE_CRED_PATH")
-                if cred_path and os.path.exists(cred_path):
+                # Render.com에 업로드된 경로로 고정
+                cred_path = "/etc/secrets/namuna-841ba-firebase-adminsdk-fbsvc-dcb864eeb3.json"
+                
+                if os.path.exists(cred_path):
                     cred = credentials.Certificate(cred_path)
                     firebase_admin.initialize_app(cred)
-                    logger.info("✅ Firebase 초기화 완료 (credential file)")
+                    logger.info(f"✅ Firebase 초기화 완료: {cred_path}")
                 else:
-                    # 환경 변수가 없으면 기본 credential 사용 (개발 환경)
-                    firebase_admin.initialize_app()
-                    logger.info("✅ Firebase 초기화 완료 (default credentials)")
+                    logger.error(f"❌ Firebase credentials 파일을 찾을 수 없습니다: {cred_path}")
+                    self.db = None
+                    return
                 
                 self.db = firestore.client()
                 logger.info("✅ Firestore 클라이언트 생성 완료")
@@ -59,6 +61,8 @@ Example:
                 logger.info("✅ 기존 Firebase 앱 사용")
         except Exception as e:
             logger.error(f"❌ Firebase 초기화 실패: {e}")
+            logger.error(f"   현재 작업 디렉토리: {os.getcwd()}")
+            logger.error(f"   /etc/secrets/ 존재 여부: {os.path.exists('/etc/secrets/')}")
             self.db = None
     
     def _get_today_date(self) -> str:
