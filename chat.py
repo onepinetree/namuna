@@ -2,6 +2,7 @@ import os
 import asyncio
 import logging
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from openai import OpenAI
 import firebase_admin
 from firebase_admin import credentials, firestore
@@ -24,8 +25,9 @@ class NamunaChat:
         self.temperature = 0.70
         self.max_retries = 3
         
-        # 현재 날짜와 시간 정보 생성
-        now = datetime.now()
+        # 현재 날짜와 시간 정보 생성 (한국 시간)
+        kst = ZoneInfo("Asia/Seoul")
+        now = datetime.now(kst)
         date_str = now.strftime("%Y년 %m월 %d일")
         weekday_str = ["월요일", "화요일", "수요일", "목요일", "금요일", "토요일", "일요일"][now.weekday()]
         hour = now.hour
@@ -85,8 +87,9 @@ Example:
             self.db = None
     
     def _get_today_date(self) -> str:
-        """오늘 날짜를 YYYY-MM-DD 형식으로 반환"""
-        return datetime.now().strftime("%Y-%m-%d")
+        """오늘 날짜를 YYYY-MM-DD 형식으로 반환 (한국 시간)"""
+        kst = ZoneInfo("Asia/Seoul")
+        return datetime.now(kst).strftime("%Y-%m-%d")
     
     async def save_message(self, role: str, content: str, date: str = None):
         """
@@ -105,10 +108,11 @@ Example:
             date = date or self._get_today_date()
             doc_ref = self.db.collection('chat_history').document(date)
             
+            kst = ZoneInfo("Asia/Seoul")
             message_data = {
                 "role": role,
                 "content": content,
-                "timestamp": datetime.now().isoformat()
+                "timestamp": datetime.now(kst).isoformat()
             }
             
             # 문서가 이미 존재하면 messages 배열에 추가, 없으면 새로 생성
@@ -121,7 +125,7 @@ Example:
                 doc_ref.set({
                     "date": date,
                     "messages": [message_data],
-                    "created_at": datetime.now().isoformat()
+                    "created_at": datetime.now(kst).isoformat()
                 })
             
             logger.info(f"✅ 메시지 저장 완료: {role} - {date}")
